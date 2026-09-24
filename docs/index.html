@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>台股策略篩選器</title>
+<meta name="description" content="自訂技術、籌碼、基本面條件，依產業板塊篩選台股並回測進出場規則。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>台股策略篩選器</h1>
+    <p class="stamp" id="stamp">資料載入中…</p>
+  </div>
+  <button class="ghost" id="btnSources" type="button">資料來源</button>
+</header>
+
+<div class="layout">
+  <aside class="side" id="side">
+    <details open class="side-block">
+      <summary>市場與流動性</summary>
+      <div class="seg" id="mkt" role="radiogroup" aria-label="市場">
+        <button data-v="all" aria-pressed="true">全部</button><button data-v="上市">上市</button><button data-v="上櫃">上櫃</button>
+      </div>
+      <label class="row">成交量至少 <input type="number" id="minVol" min="0" step="100" value="500"> 張</label>
+      <label class="row">股價 <input type="number" id="minPx" min="0" placeholder="最低"> ～ <input type="number" id="maxPx" min="0" placeholder="最高"></label>
+      <label class="row"><input type="search" id="search" placeholder="代號或名稱，例如 2330"></label>
+    </details>
+
+    <details open class="side-block">
+      <summary>產業板塊 <span class="count" id="indCount"></span></summary>
+      <div class="side-tools"><button class="link" id="indAll">全選</button><button class="link" id="indNone">清除</button></div>
+      <ul class="ind-list" id="indList"></ul>
+    </details>
+
+    <details open class="side-block">
+      <summary>自選板塊</summary>
+      <ul class="board-list" id="boardList"></ul>
+      <button class="ghost wide" id="boardNew">建立自選板塊</button>
+    </details>
+  </aside>
+
+  <main class="main">
+    <section class="strategy" aria-label="策略">
+      <div class="strat-bar">
+        <select id="stratPick" aria-label="我的策略"></select>
+        <select id="tplPick" aria-label="套用範本"><option value="">套用範本…</option></select>
+        <div class="strat-actions">
+          <button id="stratSave">儲存</button>
+          <button id="stratSaveAs" class="ghost">另存新策略</button>
+          <button id="stratDel" class="ghost">刪除</button>
+          <button id="stratShare" class="ghost">複製分享連結</button>
+          <button id="stratExport" class="ghost">匯出</button>
+          <label class="ghost file-btn">匯入<input type="file" id="stratImport" accept="application/json" hidden></label>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="sel" aria-selected="true">選股條件 <b id="nSel">0</b></button>
+        <button role="tab" data-tab="entry">進場條件 <b id="nEntry">0</b></button>
+        <button role="tab" data-tab="exit">出場條件 <b id="nExit">0</b></button>
+        <button role="tab" data-tab="risk">風控與成本</button>
+      </div>
+      <div class="tab-body" id="tabBody"></div>
+
+      <div class="run">
+        <button class="primary" id="btnRun">執行篩選</button>
+        <p class="summary" id="summary">設定條件後按「執行篩選」。</p>
+      </div>
+    </section>
+
+    <section class="results" aria-label="篩選結果">
+      <div class="res-bar">
+        <div class="seg" id="view" role="radiogroup" aria-label="顯示">
+          <button data-v="sel" aria-pressed="true">符合選股</button>
+          <button data-v="entry">今日進場訊號</button>
+          <button data-v="exit">今日出場訊號</button>
+          <button data-v="boards">板塊統計</button>
+        </div>
+        <button class="ghost" id="btnCsv">下載 CSV</button>
+      </div>
+      <div class="table-wrap"><table id="tbl"></table></div>
+      <div class="pager" id="pager"></div>
+    </section>
+    <p class="disclaimer">本站為技術研究工具，所有資料與回測結果僅供參考，不構成任何投資建議。</p>
+  </main>
+</div>
+
+<dialog id="detail" class="detail">
+  <div class="detail-head">
+    <h2 id="dTitle"></h2>
+    <button class="ghost" id="dClose" aria-label="關閉">關閉</button>
+  </div>
+  <div class="chart-wrap"><canvas id="chart" height="380"></canvas></div>
+  <div class="detail-grid">
+    <div><h3>今日條件檢查</h3><table class="mini" id="dConds"></table></div>
+    <div><h3>回測交易紀錄</h3><p class="bt-sum" id="dStats"></p><div class="mini-wrap"><table class="mini" id="dTrades"></table></div></div>
+  </div>
+</dialog>
+
+<dialog id="boardDlg" class="small-dlg">
+  <form method="dialog" id="boardForm">
+    <h2 id="boardDlgTitle">建立自選板塊</h2>
+    <label>名稱<input id="boardName" required placeholder="例如：散熱族群"></label>
+    <label>股票代號（空白、逗號或換行分隔）<textarea id="boardIds" rows="5" required placeholder="3017 3324 2421 6230"></textarea></label>
+    <div class="dlg-actions"><button value="cancel" class="ghost" formnovalidate>取消</button><button value="ok" class="primary">儲存板塊</button></div>
+  </form>
+</dialog>
+
+<dialog id="srcDlg" class="small-dlg">
+  <h2>資料來源與狀態</h2>
+  <div id="srcBody"></div>
+  <form method="dialog"><div class="dlg-actions"><button class="primary">關閉</button></div></form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

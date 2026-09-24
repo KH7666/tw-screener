@@ -1,0 +1,6 @@
+pandas>=2.1
+requests>=2.31
+lxml>=5.0
+html5lib>=1.1
+yfinance>=0.2.54
+twstock>=1.3
