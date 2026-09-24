@@ -124,9 +124,9 @@ def twstock_industry(code: str) -> str:
 
 
 # ───────────────────────── 2. 官方全市場當日行情 ─────────────────────────
-def official_snapshot() -> tuple[dict, dict]:
-    """回傳 (bars: id -> (date, [o,h,l,c,v張]), names: id -> (name, mkt))"""
-    bars, names = {}, {}
+def official_snapshot() -> tuple[dict, dict, dict]:
+    """回傳 (bars: id -> (date, [o,h,l,c,v張]), names: id -> (name, mkt), 各市場資料日期)"""
+    bars, names, mdates = {}, {}, {}
     rows = fetch(f"{TWSE_OA}/exchangeReport/STOCK_DAY_ALL") or []
     for r in rows:
         c = num(r.get("ClosingPrice"))
@@ -137,6 +137,7 @@ def official_snapshot() -> tuple[dict, dict]:
         v = num(r.get("TradeVolume")) or 0
         bars[code] = (roc(r["Date"]), [num(r.get("OpeningPrice")) or c, num(r.get("HighestPrice")) or c,
                                        num(r.get("LowestPrice")) or c, c, round(v / 1000)])
+        mdates["上市"] = max(mdates.get("上市", ""), bars[code][0])
     n1 = len(bars)
     rows = fetch(f"{TPEX_OA}/tpex_mainboard_daily_close_quotes") or []
     for r in rows:
@@ -148,9 +149,30 @@ def official_snapshot() -> tuple[dict, dict]:
         v = num(r.get("TradingShares")) or 0
         bars[code] = (roc(r["Date"]), [num(r.get("Open")) or c, num(r.get("High")) or c,
                                        num(r.get("Low")) or c, c, round(v / 1000)])
-    status["snapshot"] = f"官方當日行情：上市 {n1} 檔、上櫃 {len(bars) - n1} 檔"
+        mdates["上櫃"] = max(mdates.get("上櫃", ""), bars[code][0])
+    status["snapshot"] = (f"官方當日行情：上市 {n1} 檔（{mdates.get('上市', '無')}）、"
+                          f"上櫃 {len(bars) - n1} 檔（{mdates.get('上櫃', '無')}）")
     log(status["snapshot"])
-    return bars, names
+    return bars, names, mdates
+
+
+def twse_day(day: str) -> dict:
+    """證交所 rwd MI_INDEX：指定日期的上市全市場收盤行情（OpenAPI 尚未更新時補當日）。
+    欄位：0 代號、2 成交股數、5 開、6 高、7 低、8 收。"""
+    j = fetch("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+              params={"response": "json", "date": day.replace("-", ""), "type": "ALLBUT0999"}, tries=3)
+    if not j or j.get("stat") != "OK":
+        return {}
+    table = next((t for t in j.get("tables") or [] if "每日收盤行情" in (t.get("title") or "")), None)
+    out = {}
+    for r in (table or {}).get("data") or []:
+        if len(r) < 9:
+            continue
+        c = num(r[8])
+        if not c:
+            continue
+        out[str(r[0]).strip()] = [num(r[5]) or c, num(r[6]) or c, num(r[7]) or c, c, round((num(r[2]) or 0) / 1000)]
+    return out
 
 
 # ───────────────────────── 3. 歷史補齊（Yahoo，只在需要時） ─────────────────────────
@@ -159,35 +181,42 @@ def yahoo_history(uni: dict, period: str) -> dict[str, dict[str, list]]:
     tick = {sid: sid + (".TW" if u["mkt"] == "上市" else ".TWO") for sid, u in uni.items()}
     ids, out = list(tick), {}
     for i in range(0, len(ids), 100):
-        chunk = ids[i:i + 100]
-        df = None
-        for attempt in range(4):
+        for attempt in range(3):  # 第 2、3 次只重抓缺漏的代號（Yahoo 偶發 401 Invalid Crumb）
+            chunk = [x for x in ids[i:i + 100] if x not in out]
+            if not chunk:
+                break
+            if attempt:
+                time.sleep(10 * attempt)
             try:
                 df = yf.download([tick[x] for x in chunk], period=period, interval="1d", group_by="ticker",
                                  auto_adjust=False, threads=True, progress=False, timeout=30)
-                break
             except Exception as e:  # noqa: BLE001
-                log(f"  Yahoo 重試 {attempt + 1}：{e}"); time.sleep(15 * (attempt + 1))
-        if df is None or df.empty:
-            continue
-        for sid in chunk:
-            try:
-                sub = df[tick[sid]] if isinstance(df.columns, pd.MultiIndex) else df
-                sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
-            except KeyError:
+                log(f"  Yahoo 重試 {attempt + 1}：{e}"); continue
+            if df is None or df.empty:
                 continue
-            rec = {}
-            for ts, x in sub.iterrows():
-                if not x["Volume"] or x["Volume"] <= 0:
-                    continue  # 排除 Yahoo 在休市日產生的空白列
-                rec[pd.Timestamp(ts).strftime("%Y-%m-%d")] = [round(float(x["Open"]), 2), round(float(x["High"]), 2),
-                                                              round(float(x["Low"]), 2), round(float(x["Close"]), 2),
-                                                              round(float(x["Volume"]) / 1000)]
-            if rec:
-                out[sid] = rec
-        log(f"  Yahoo 歷史 {min(i + 100, len(ids))}/{len(ids)}")
+            _collect(df, chunk, tick, out)
+        log(f"  Yahoo 歷史 {min(i + 100, len(ids))}/{len(ids)}（已取得 {len(out)}）")
         time.sleep(2)
     return out
+
+
+def _collect(df, chunk, tick, out):
+    """把 yf.download 結果整理成 {代號: {日期: [開, 高, 低, 收, 張]}}"""
+    for sid in chunk:
+        try:
+            sub = df[tick[sid]] if isinstance(df.columns, pd.MultiIndex) else df
+            sub = sub[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+        except KeyError:
+            continue
+        rec = {}
+        for ts, x in sub.iterrows():
+            if not x["Volume"] or x["Volume"] <= 0:
+                continue  # 排除 Yahoo 在休市日產生的空白列
+            rec[pd.Timestamp(ts).strftime("%Y-%m-%d")] = [round(float(x["Open"]), 2), round(float(x["High"]), 2),
+                                                          round(float(x["Low"]), 2), round(float(x["Close"]), 2),
+                                                          round(float(x["Volume"]) / 1000)]
+        if rec:
+            out[sid] = rec
 
 
 # ───────────────────────── 4. 三大法人 ─────────────────────────
@@ -287,19 +316,43 @@ def load_store():
     return bars, inst
 
 
-def trading_days(bars) -> list[str]:
-    cnt: dict[str, int] = {}
-    for b in bars.values():
+def coverage(bars, uni) -> dict[str, dict[str, float]]:
+    """各市場每日有真實 K 棒的比例：{市場: {日期: 比例}}"""
+    cnt: dict[str, dict[str, int]] = {}
+    for sid, b in bars.items():
+        m = uni.get(sid, {}).get("mkt")
+        if not m:
+            continue
+        c = cnt.setdefault(m, {})
         for d in b:
-            cnt[d] = cnt.get(d, 0) + 1
-    top = max(cnt.values()) if cnt else 0
-    return sorted(d for d, n in cnt.items() if n >= top * 0.5)
+            c[d] = c.get(d, 0) + 1
+    out = {}
+    for m, c in cnt.items():
+        top = max(c.values())
+        out[m] = {d: n / top for d, n in c.items()}
+    return out
+
+
+def trading_days(bars, uni) -> list[str]:
+    days = set()
+    for c in coverage(bars, uni).values():
+        days |= {d for d, r in c.items() if r >= 0.5}
+    return sorted(days)
+
+
+def complete_day(bars, uni) -> str | None:
+    """上市、上櫃都有 ≥80% 股票具真實 K 棒的最新一日"""
+    cov = coverage(bars, uni)
+    if len(cov) < 2:
+        return None
+    common = set.intersection(*[{d for d, r in c.items() if r >= 0.8} for c in cov.values()])
+    return max(common) if common else None
 
 
 def main() -> int:
     uni = universe()
     bars, inst = load_store()
-    snap, names = official_snapshot()
+    snap, names, mdates = official_snapshot()
     if len(snap) < 1500:
         log("官方當日行情不完整，稍後重試；本次不更新。")
         return 1
@@ -312,15 +365,16 @@ def main() -> int:
     for code, (nm, _) in names.items():  # 名稱以官方行情為準
         if code in uni and nm:
             uni[code]["name"] = nm
+    ub = lambda: {k: v for k, v in bars.items() if k in uni}  # noqa: E731
 
-    snap_day = max(d for d, _ in snap.values())
-    known = trading_days(bars)
+    target = max(mdates.values())  # 官方已公布的最新交易日（兩市場可能不同步）
+    known = trading_days(ub(), uni)
     need = None
     if len(known) < 60:
         need = "1y"
     else:
         last = date.fromisoformat(known[-1])
-        biz = sum(1 for i in range(1, (date.fromisoformat(snap_day) - last).days) if (last + timedelta(i)).weekday() < 5)
+        biz = sum(1 for i in range(1, (date.fromisoformat(target) - last).days) if (last + timedelta(i)).weekday() < 5)
         if biz > 0:
             need = "6mo" if biz > 40 else "3mo"
     if need:
@@ -330,7 +384,7 @@ def main() -> int:
         for sid, rec in yh.items():
             b = bars.setdefault(sid, {})
             for d, bar in rec.items():
-                if d not in b and d < snap_day:
+                if d not in b and d <= target:
                     b[d] = bar; added += 1
         status["history"] = f"Yahoo 補歷史 {len(yh)} 檔、{added} 筆（{need}）"
     else:
@@ -340,7 +394,40 @@ def main() -> int:
         if sid in uni:
             bars.setdefault(sid, {})[d] = bar
 
-    days = trading_days({k: v for k, v in bars.items() if k in uni})[-N_DAYS:]
+    # 某市場 OpenAPI 尚未更新到最新交易日：上市用證交所指定日期端點補，上櫃用 Yahoo 補
+    def pending(m):
+        start = date.fromisoformat(mdates.get(m) or (known[-1] if known else target))
+        end = date.fromisoformat(target)
+        return [(start + timedelta(i)).isoformat() for i in range(1, (end - start).days + 1)
+                if (start + timedelta(i)).weekday() < 5]
+    fill = []
+    for d in pending("上市"):
+        got = twse_day(d); time.sleep(2.2)
+        for sid, bar in got.items():
+            if sid in uni:
+                bars.setdefault(sid, {})[d] = bar
+        fill.append(f"上市 {d}：MI_INDEX {len(got)} 檔")
+    otc_days = pending("上櫃")
+    if otc_days:
+        yh = yahoo_history({k: v for k, v in uni.items() if v["mkt"] == "上櫃"}, "1mo")
+        n = 0
+        for sid, rec in yh.items():
+            for d in otc_days:
+                if d in rec and d not in bars.setdefault(sid, {}):
+                    bars[sid][d] = rec[d]; n += 1
+        fill.append(f"上櫃 {','.join(otc_days)}：Yahoo 補 {n} 筆")
+    if fill:
+        status["lag_fill"] = "；".join(fill)
+        log("補齊落後市場：" + status["lag_fill"])
+
+    pub = complete_day(ub(), uni)  # 兩市場都完整的最新一日
+    if not pub:
+        log("找不到上市、上櫃皆完整的交易日；本次不更新。")
+        return 1
+    if pub < target:
+        status["lag"] = f"{target} 尚有市場資料不完整，本次發布至 {pub}"
+        log(status["lag"])
+    days = [d for d in trading_days(ub(), uni) if d <= pub][-N_DAYS:]
     log(f"交易日 {days[0]} ～ {days[-1]}（{len(days)} 日）")
 
     # 三大法人：上市逐日補 T86；上櫃用 OpenAPI 最新一日，缺的歷史嘗試舊版日報
@@ -348,7 +435,7 @@ def main() -> int:
     d_o, latest_o = tpex_inst_latest()
     if latest_o:
         for sid, v in latest_o.items():
-            inst.setdefault(sid, {})[d_o or snap_day] = v
+            inst.setdefault(sid, {})[d_o or mdates.get("上櫃", target)] = v
     listed = [s for s, u in uni.items() if u["mkt"] == "上市"]
     otc = [s for s, u in uni.items() if u["mkt"] == "上櫃"]
     for d in days:
@@ -395,8 +482,8 @@ def main() -> int:
 
     # 發布前驗證
     fresh = sum(1 for s in out if s["c"][-1] is not None and s["v"][-1])
-    if len(out) < MIN_STOCKS or days[-1] != snap_day:
-        log(f"驗證失敗：{len(out)} 檔、最後日 {days[-1]} vs 官方 {snap_day}；不覆蓋舊資料。")
+    if len(out) < MIN_STOCKS or (date.fromisoformat(target) - date.fromisoformat(days[-1])).days > 7:
+        log(f"驗證失敗：{len(out)} 檔、最後日 {days[-1]} vs 官方 {target}；不覆蓋舊資料。")
         return 1
     meta = {
         "updated": datetime.now(TZ).strftime("%Y/%m/%d %H:%M"),
