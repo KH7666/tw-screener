@@ -17,11 +17,23 @@
     <h1>台股策略篩選器</h1>
     <p class="stamp" id="stamp">資料載入中…</p>
   </div>
-  <button class="ghost" id="btnSources" type="button">資料來源</button>
+  <div class="top-right">
+    <span class="live-pill" id="livePill" hidden role="status"></span>
+    <button class="ghost" id="btnSources" type="button">資料來源</button>
+  </div>
 </header>
 
 <div class="layout">
   <aside class="side" id="side">
+    <details open class="side-block">
+      <summary>自選清單 <span class="count" id="watchCount"></span></summary>
+      <div class="watch-add">
+        <input id="watchInput" list="stockList" placeholder="代號或名稱，按 Enter 加入" autocomplete="off">
+        <button class="ghost" id="watchAdd" type="button">加入</button>
+        <datalist id="stockList"></datalist>
+      </div>
+      <div class="watch-wrap"><table class="watch" id="watchTbl"></table></div>
+    </details>
     <details open class="side-block">
       <summary>市場與流動性</summary>
       <div class="seg" id="mkt" role="radiogroup" aria-label="市場">
@@ -70,6 +82,7 @@
 
       <div class="run">
         <button class="primary" id="btnRun">執行篩選</button>
+        <label class="live-toggle" id="liveToggleWrap" hidden><input type="checkbox" id="liveToggle"> 盤中以即時價篩選</label>
         <p class="summary" id="summary">設定條件後按「執行篩選」。</p>
       </div>
     </section>
@@ -87,7 +100,7 @@
       <div class="table-wrap"><table id="tbl"></table></div>
       <div class="pager" id="pager"></div>
     </section>
-    <p class="disclaimer">本站為技術研究工具，所有資料與回測結果僅供參考，不構成任何投資建議。</p>
+    <p class="disclaimer">本站為技術研究工具，所有資料與回測結果僅供參考，不構成任何投資建議。盤中報價取自證交所基本市況報導，可能有延遲或中斷。圖表由 <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™ 提供。</p>
   </main>
 </div>
 
@@ -96,7 +109,11 @@
     <h2 id="dTitle"></h2>
     <button class="ghost" id="dClose" aria-label="關閉">關閉</button>
   </div>
-  <div class="chart-wrap"><canvas id="chart" height="380"></canvas></div>
+  <div class="d-quote" id="dQuote" hidden></div>
+  <div class="chart-bar">
+    <div class="seg" id="chartTabs" role="radiogroup" aria-label="圖表"><button data-c="day" aria-pressed="true">日 K</button><button data-c="intra">即時 1 分 K</button></div>
+  </div>
+  <div class="chart-wrap"><div id="lwc" class="lwc"></div><p class="chart-note" id="chartNote"></p></div>
   <div class="detail-grid">
     <div><h3>今日條件檢查</h3><table class="mini" id="dConds"></table></div>
     <div><h3>回測交易紀錄</h3><p class="bt-sum" id="dStats"></p><div class="mini-wrap"><table class="mini" id="dTrades"></table></div></div>
@@ -119,7 +136,10 @@
 </dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="config.js"></script>
+<script src="vendor/lightweight-charts.standalone.production.js"></script>
 <script src="engine.js"></script>
+<script src="live.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

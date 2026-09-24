@@ -28,6 +28,7 @@
   color-scheme: dark;
 }
 *, *::before, *::after { box-sizing: inherit; }
+[hidden] { display: none !important; }
 html { scroll-padding-top: env(safe-area-inset-top, 0px); }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
@@ -170,3 +171,31 @@ dialog::backdrop { background: rgba(20, 28, 36, .45); }
 .toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: 8px 16px; border-radius: 8px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; }
 .toast.show { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+
+/* ---------- 即時行情 ---------- */
+.top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.live-pill { font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.live-pill.on { color: var(--up); border-color: var(--up); font-weight: 700; }
+.live-pill.err { color: var(--signal); border-color: var(--signal); }
+.live-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+.live-note { color: var(--signal); font-size: 13px; font-weight: 700; }
+.watch-add { display: flex; gap: 6px; margin: 6px 0 8px; }
+.watch-add input { flex: 1; min-width: 0; }
+.watch-wrap { max-height: 300px; overflow: auto; }
+table.watch { font-size: 13px; }
+table.watch td { padding: 4px 4px; border-bottom: 1px solid var(--line); }
+table.watch tr { cursor: pointer; }
+table.watch .wname { color: var(--muted); }
+table.watch .del { font-size: 15px; padding: 0 4px; }
+@keyframes flashUp { from { background: color-mix(in srgb, var(--up) 30%, transparent); } to { background: transparent; } }
+@keyframes flashDn { from { background: color-mix(in srgb, var(--down) 30%, transparent); } to { background: transparent; } }
+.flash-up { animation: flashUp .9s ease-out; }
+.flash-dn { animation: flashDn .9s ease-out; }
+@media (prefers-reduced-motion: reduce) { .flash-up, .flash-dn { animation: none; } }
+.d-quote { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; padding: 10px 18px 0; font-size: 14px; }
+.d-quote .qz { font-size: 24px; font-weight: 900; }
+.chart-bar { display: flex; justify-content: flex-start; padding: 10px 14px 0; }
+.lwc { width: 100%; height: 400px; }
+@media (max-width: 760px) { .lwc { height: 300px; } }
+.chart-note { margin: 4px 2px 0; color: var(--muted); font-size: 12px; }
+.disclaimer a { color: inherit; }

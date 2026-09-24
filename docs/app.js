@@ -56,6 +56,7 @@
     strategies: store.get('strategies', []),
     cur: null, curIdx: -1, tab: 'sel',
     results: [], view: 'sel', sort: { k: 'chg', dir: -1 }, page: 0, ran: false,
+    watch: store.get('watch', []), liveMode: false, runDates: null, isLiveRun: false, detail: null,
   };
 
   // ---------- 資料載入（GitHub Pages → jsDelivr 備援） ----------
@@ -80,15 +81,15 @@
   }
 
   // ---------- 股票池 ----------
-  function universe() {
-    const f = S.f, q = f.q.trim().toLowerCase();
+  function universe(src = S.data.stocks) {
+    const f = S.f, q = f.q.trim().toLowerCase(), Lv = S.data.dates.length - 1;
     const board = f.board !== null ? new Set(S.boards[f.board]?.ids || []) : null;
-    return S.data.stocks.filter((s) => {
+    return src.filter((s) => {
       if (board && !board.has(s.id)) return false;
       if (f.mkt !== 'all' && s.mkt !== f.mkt) return false;
       if (!board && f.inds.size && !f.inds.has(s.ind)) return false;
       if (q && !s.id.includes(q) && !s.name.toLowerCase().includes(q)) return false;
-      const L = s.c.length - 1, c = s.c[L], v = s.v[L];
+      const c = s.c[s.c.length - 1], v = s.v[Lv];
       if (c === null) return false;
       if (f.minVol && (v || 0) < f.minVol) return false;
       if (f.minPx && c < f.minPx) return false;
@@ -209,21 +210,39 @@
   function setStrategy(st, idx = -1) { S.cur = clone(st); S.cur.risk = { ...blankStrat().risk, ...(S.cur.risk || {}) }; S.curIdx = idx; renderStratPick(); renderTab(); store.set('last', S.cur); }
 
   // ---------- 篩選 ----------
-  function run() {
-    const t0 = performance.now(), uni = universe(), st = S.cur;
-    const L = S.data.dates.length - 1;
-    S.results = uni.map((s) => {
-      const ev = E.evaluate(s, st), c = s.c[L], pc = s.c[L - 1];
-      return { s, id: s.id, name: s.name, ind: s.ind, mkt: s.mkt, close: c, chg: pc ? (c / pc - 1) * 100 : null, vol: s.v[L],
-        sel: ev.sel, entry: ev.entry, exit: ev.exit, bt: ev.bt, btTotal: ev.bt.total, btWin: ev.bt.winRate, btN: ev.bt.n };
-    });
-    S.ran = true; S.page = 0;
+  // 盤中模式：把即時報價當作「今天」這根 K 棒，接在歷史資料後面再計算指標
+  const liveDayISO = () => { const d = Live.day; return d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : null; };
+  function stocksForRun() {
+    const dates = S.data.dates, day = liveDayISO();
+    if (!S.liveMode || !day || day <= dates[dates.length - 1]) return { stocks: null, dates };
+    const out = new Map();
+    for (const s of S.data.stocks) {
+      const q = Live.quote(s.id), prev = s.c[s.c.length - 1], has = !!(q && q.z && q.v);
+      const bar = has ? [q.o || q.z, Math.max(q.h || q.z, q.z), Math.min(q.l || q.z, q.z), q.z, Math.round(q.v)] : [prev, prev, prev, prev, 0];
+      out.set(s.id, { ...s, o: [...s.o, bar[0]], h: [...s.h, bar[1]], l: [...s.l, bar[2]], c: [...s.c, bar[3]], v: [...s.v, bar[4]],
+        fi: s.fi && [...s.fi, 0], it: s.it && [...s.it, 0], dl: s.dl && [...s.dl, 0], live: has });
+    }
+    return { stocks: out, dates: [...dates, day] };
+  }
+  function makeResult(s, L) {
+    const ev = E.evaluate(s, S.cur), c = s.c[L], pc = s.c[L - 1];
+    return { s, id: s.id, name: s.name, ind: s.ind, mkt: s.mkt, close: c, chg: pc ? (c / pc - 1) * 100 : null, vol: s.v[L],
+      sel: ev.sel, entry: ev.entry, exit: ev.exit, bt: ev.bt, btTotal: ev.bt.total, btWin: ev.bt.winRate, btN: ev.bt.n };
+  }
+  function run(opt = {}) {
+    const t0 = performance.now(), aug = stocksForRun();
+    S.runDates = aug.dates; S.isLiveRun = !!aug.stocks;
+    const src = aug.stocks ? S.data.stocks.map((s) => aug.stocks.get(s.id)) : S.data.stocks;
+    const uni = universe(src), L = aug.dates.length - 1;
+    S.results = uni.map((s) => makeResult(s, L));
+    S.ran = true; if (!opt.keepPage) S.page = 0;
     const nSel = S.results.filter((r) => r.sel).length, nIn = S.results.filter((r) => r.entry).length, nOut = S.results.filter((r) => r.exit).length;
     const trades = S.results.flatMap((r) => r.bt.trades);
     const win = trades.filter((t) => t.ret > 0).length, avg = trades.length ? trades.reduce((a, t) => a + t.ret, 0) / trades.length : null;
     const sum = $('#summary'); sum.innerHTML = '';
+    if (S.isLiveRun) sum.append(h('span', { class: 'live-note' }, `盤中即時篩選（台灣時間 ${new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Taipei' })} 報價，法人今日以 0 計）`), h('br'));
     sum.append('股票池 ', h('strong', {}, uni.length), ' 檔，符合選股 ', h('strong', {}, nSel), ' 檔，今日進場訊號 ', h('strong', { class: 'sig' }, nIn), ' 檔，出場訊號 ', h('strong', {}, nOut), ' 檔。',
-      h('br'), trades.length ? `近 ${S.data.dates.length} 個交易日回測：${trades.length} 筆交易，勝率 ${fmt((win / trades.length) * 100, 1)}%，平均每筆 ${pct(avg * 100)}。` : '回測期間沒有觸發交易。',
+      h('br'), trades.length ? `近 ${aug.dates.length} 個交易日回測：${trades.length} 筆交易，勝率 ${fmt((win / trades.length) * 100, 1)}%，平均每筆 ${pct(avg * 100)}。` : '回測期間沒有觸發交易。',
       h('span', { class: 'count' }, `（${Math.round(performance.now() - t0)} 毫秒）`));
     renderResults();
   }
@@ -236,39 +255,87 @@
     { k: 'close', label: '收盤' }, { k: 'chg', label: '漲跌' }, { k: 'vol', label: '成交量（張）' },
     { k: 'sig', label: '今日訊號', l: true }, { k: 'btN', label: '回測筆數' }, { k: 'btWin', label: '勝率' }, { k: 'btTotal', label: '累計報酬' },
   ];
+  const LIVE_COLS = [{ k: 'lz', label: '即時價' }, { k: 'lchg', label: '即時漲跌' }];
+  const cols = () => (Live.enabled ? [...COLS.slice(0, 6), ...LIVE_COLS, ...COLS.slice(6)] : COLS);
   function rowsForView() {
     const v = S.view;
     let rows = S.results.filter((r) => (v === 'entry' ? r.entry : v === 'exit' ? r.exit : r.sel));
     const { k, dir } = S.sort;
-    const key = k === 'sig' ? (r) => (r.entry ? 2 : 0) + (r.exit ? 1 : 0) : (r) => r[k];
+    const key = k === 'sig' ? (r) => (r.entry ? 2 : 0) + (r.exit ? 1 : 0) : k === 'lz' ? (r) => Live.quote(r.id)?.z ?? null : k === 'lchg' ? (r) => Live.quote(r.id)?.chg ?? null : (r) => r[k];
     rows.sort((a, b) => { const x = key(a), y = key(b); if (x === y) return 0; if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1; return (x > y ? 1 : -1) * dir; });
     return rows;
   }
+  const liveCells = (id) => { const q = Live.quote(id); return [h('td', { 'data-lz': id, 'data-v': q?.z ?? '', class: cls(q?.chg) }, q?.z ? fmt(q.z) : '—'), h('td', { 'data-lc': id, class: cls(q?.chg) }, q?.chg != null ? pct(q.chg) : '—')]; };
   function renderResults() {
     const tbl = $('#tbl'); tbl.innerHTML = ''; $('#pager').innerHTML = '';
     $$('#view button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === S.view)));
     if (!S.ran) { tbl.append(h('tbody', {}, h('tr', {}, h('td', { class: 'empty' }, '選好板塊與條件後，按「執行篩選」。')))); return; }
-    if (S.view === 'boards') return renderBoardStats(tbl);
-    const rows = rowsForView(), per = 100, pages = Math.ceil(rows.length / per);
+    if (S.view === 'boards') { Live.setPage([]); return renderBoardStats(tbl); }
+    const C2 = cols(), rows = rowsForView(), per = 100, pages = Math.ceil(rows.length / per);
     S.page = Math.min(S.page, Math.max(0, pages - 1));
-    const thead = h('thead', {}, h('tr', {}, ...COLS.map((c) => h('th', { class: c.l ? 'l' : '', scope: 'col', 'aria-sort': S.sort.k === c.k ? (S.sort.dir < 0 ? 'descending' : 'ascending') : null, tabindex: 0,
+    const thead = h('thead', {}, h('tr', {}, ...C2.map((c) => h('th', { class: c.l ? 'l' : '', scope: 'col', 'aria-sort': S.sort.k === c.k ? (S.sort.dir < 0 ? 'descending' : 'ascending') : null, tabindex: 0,
       onclick: () => { S.sort = { k: c.k, dir: S.sort.k === c.k ? -S.sort.dir : -1 }; renderResults(); },
       onkeydown: (e) => { if (e.key === 'Enter') e.target.click(); } }, c.label))));
-    const tb = h('tbody');
-    if (!rows.length) tb.append(h('tr', {}, h('td', { class: 'empty', colspan: COLS.length }, S.view === 'sel' ? '沒有股票符合條件。試著放寬條件、降低成交量門檻，或擴大板塊範圍。' : '今天沒有股票出現這類訊號。')));
-    for (const r of rows.slice(S.page * per, S.page * per + per)) {
+    const tb = h('tbody'), shown = rows.slice(S.page * per, S.page * per + per);
+    if (!rows.length) tb.append(h('tr', {}, h('td', { class: 'empty', colspan: C2.length }, S.view === 'sel' ? '沒有股票符合條件。試著放寬條件、降低成交量門檻，或擴大板塊範圍。' : '今天沒有股票出現這類訊號。')));
+    for (const r of shown) {
       tb.append(h('tr', { tabindex: 0, onclick: () => openDetail(r), onkeydown: (e) => { if (e.key === 'Enter') openDetail(r); } },
         h('td', { class: 'l code' }, r.id), h('td', { class: 'l' }, r.name), h('td', { class: 'l' }, r.ind),
         h('td', { class: cls(r.chg) }, fmt(r.close)), h('td', { class: cls(r.chg) }, pct(r.chg)), h('td', {}, fmt(r.vol, 0)),
+        ...(Live.enabled ? liveCells(r.id) : []),
         h('td', { class: 'l' }, r.entry ? h('span', { class: 'tag in' }, '進場') : '', ' ', r.exit ? h('span', { class: 'tag out' }, '出場') : ''),
         h('td', {}, r.btN || '—'), h('td', {}, r.btWin === null ? '—' : fmt(r.btWin * 100, 0) + '%'), h('td', { class: cls(r.btTotal) }, r.btTotal === null ? '—' : pct(r.btTotal * 100, 1))));
     }
     tbl.append(thead, tb);
+    Live.setPage(shown.map((r) => r.id).slice(0, 40));
     if (pages > 1) {
       $('#pager').append(h('button', { class: 'ghost', disabled: S.page === 0, onclick: () => { S.page--; renderResults(); } }, '上一頁'),
         h('span', {}, `第 ${S.page + 1} / ${pages} 頁，共 ${rows.length} 檔`),
         h('button', { class: 'ghost', disabled: S.page >= pages - 1, onclick: () => { S.page++; renderResults(); } }, '下一頁'));
     }
+  }
+  // 即時價格就地更新（不重畫整張表），價格變動時閃爍
+  function paintLive(ids) {
+    for (const id of ids) {
+      const q = Live.quote(id); if (!q) continue;
+      $$(`[data-lz="${id}"]`).forEach((td) => {
+        const old = td.dataset.v, nv = q.z ?? '';
+        td.textContent = q.z ? fmt(q.z) : '—'; td.className = cls(q.chg);
+        if (old !== '' && nv !== '' && +old !== +nv) { void td.offsetWidth; td.classList.add(+nv > +old ? 'flash-up' : 'flash-dn'); }
+        td.dataset.v = nv;
+      });
+      $$(`[data-lc="${id}"]`).forEach((td) => { td.textContent = q.chg != null ? pct(q.chg) : '—'; td.className = cls(q.chg); });
+    }
+  }
+  const paintAllLive = () => paintLive([...new Set($$('[data-lz]').map((td) => td.dataset.lz))]);
+
+  // ---------- 自選清單 ----------
+  function renderWatch() {
+    const tb = $('#watchTbl'); tb.innerHTML = '';
+    $('#watchCount').textContent = S.watch.length ? `${S.watch.length} 檔` : '';
+    if (!S.watch.length) { tb.append(h('tbody', {}, h('tr', {}, h('td', { class: 'empty-note' }, '輸入代號加入，盤中價格會即時跳動。')))); Live.setWatch([]); return; }
+    const byId = new Map(S.data.stocks.map((s) => [s.id, s]));
+    const body = h('tbody');
+    for (const id of S.watch) {
+      const s = byId.get(id); if (!s) continue;
+      const q = Live.quote(id), L = s.c.length - 1, px = q?.z ?? s.c[L], chg = q?.chg ?? (s.c[L - 1] ? (s.c[L] / s.c[L - 1] - 1) * 100 : null);
+      body.append(h('tr', { tabindex: 0, onclick: () => openDetailById(id), onkeydown: (e) => { if (e.key === 'Enter') openDetailById(id); } },
+        h('td', { class: 'l' }, h('b', {}, id), ' ', h('span', { class: 'wname' }, s.name)),
+        h('td', { 'data-lz': id, 'data-v': q?.z ?? '', class: cls(chg) }, fmt(px)),
+        h('td', { 'data-lc': id, class: cls(chg) }, pct(chg)),
+        h('td', {}, h('button', { class: 'del', 'aria-label': `移除 ${id}`, onclick: (e) => { e.stopPropagation(); S.watch = S.watch.filter((x) => x !== id); store.set('watch', S.watch); renderWatch(); } }, '×'))));
+    }
+    tb.append(body);
+    Live.setWatch(S.watch);
+  }
+  function addWatch(text) {
+    const t = text.trim(); if (!t) return;
+    const code = t.split(/\s/)[0];
+    const s = S.data.stocks.find((x) => x.id === code) || S.data.stocks.find((x) => x.name === t) || S.data.stocks.find((x) => x.name.includes(t));
+    if (!s) return toast(`找不到「${t}」`);
+    if (S.watch.includes(s.id)) return toast(`${s.id} ${s.name} 已在自選清單`);
+    if (S.watch.length >= 30) return toast('自選清單最多 30 檔');
+    S.watch.push(s.id); store.set('watch', S.watch); renderWatch(); toast(`已加入 ${s.id} ${s.name}`);
   }
   function renderBoardStats(tbl) {
     const m = new Map();
@@ -283,6 +350,16 @@
   }
 
   // ---------- 個股詳情 ----------
+  function openDetailById(id) {
+    let r = S.results.find((x) => x.id === id);
+    if (!r) {
+      const aug = stocksForRun(), s = aug.stocks ? aug.stocks.get(id) : S.data.stocks.find((x) => x.id === id);
+      if (!s) return;
+      S.runDates = S.runDates || aug.dates;
+      r = makeResult(s, s.c.length - 1);
+    }
+    openDetail(r);
+  }
   function openDetail(r) {
     const s = r.s, dlg = $('#detail');
     $('#dTitle').textContent = `${s.id} ${s.name}　${s.mkt}｜${s.ind}`;
@@ -299,42 +376,111 @@
     }
     if (!tb.children.length) tb.append(h('tr', {}, h('td', { colspan: 4, class: 'empty' }, '目前策略沒有任何條件。')));
     ct.append(tb);
-    const bt = r.bt, D = S.data.dates.map((d) => d.replaceAll('-', '/'));
+    const dates = (S.runDates && S.runDates.length === s.c.length ? S.runDates : S.data.dates.slice(0, s.c.length));
+    const bt = r.bt, D = dates.map((d) => d.replaceAll('-', '/'));
     $('#dStats').textContent = bt.n ? `共 ${bt.n} 筆，勝率 ${fmt(bt.winRate * 100, 0)}%，累計報酬 ${pct(bt.total * 100, 1)}` + (bt.open ? `；持有中 ${pct(bt.open.ret * 100, 1)}` : '') : (bt.open ? `持有中（${D[bt.open.inIdx]} 進場），未實現 ${pct(bt.open.ret * 100, 1)}` : '回測期間沒有交易。');
     const tt = $('#dTrades'); tt.innerHTML = '';
     tt.append(h('thead', {}, h('tr', {}, ...['進場日', '進場價', '出場日', '出場價', '報酬', '原因'].map((x) => h('th', {}, x)))));
     tt.append(h('tbody', {}, ...[...bt.trades, ...(bt.open ? [{ ...bt.open, outIdx: null, reason: '持有中' }] : [])].reverse().map((t) =>
       h('tr', {}, h('td', {}, D[t.inIdx]), h('td', {}, fmt(t.inPx)), h('td', {}, t.outIdx === null ? '—' : D[t.outIdx]), h('td', {}, t.outIdx === null ? '—' : fmt(t.outPx)), h('td', { class: cls(t.ret) }, pct(t.ret * 100, 1)), h('td', {}, t.reason)))));
+    S.detail = { s, bt, dates };
+    $('#chartTabs').hidden = !Live.enabled;
+    const mode = Live.enabled && Live.status === 'live' ? 'intra' : 'day';
     dlg.showModal();
-    requestAnimationFrame(() => drawChart(s, bt));
+    requestAnimationFrame(() => showChart(mode));
+    paintQuote(s.id);
   }
-  function drawChart(s, bt) {
-    const cv = $('#chart'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = 380;
-    cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
-    const css = getComputedStyle(document.documentElement), col = (v) => css.getPropertyValue(v).trim();
-    const n = s.c.length, padL = 8, padR = 56, top = 10, priceH = H * 0.7, volTop = priceH + 24, volH = H - volTop - 18;
-    const lo = Math.min(...s.l.filter((x) => x !== null)), hi = Math.max(...s.h.filter((x) => x !== null));
-    const x = (i) => padL + ((W - padL - padR) * (i + 0.5)) / n, bw = Math.max(1, ((W - padL - padR) / n) * 0.62);
-    const y = (p) => top + (priceH - top) * (1 - (p - lo) / (hi - lo || 1));
-    const vmax = Math.max(1, ...s.v.filter((v) => v !== null));
-    g.clearRect(0, 0, W, H); g.font = '11px "Noto Sans TC", sans-serif'; g.fillStyle = col('--muted'); g.strokeStyle = col('--line'); g.lineWidth = 1;
-    for (let k = 0; k <= 4; k++) { const p = lo + ((hi - lo) * k) / 4, yy = Math.round(y(p)) + 0.5; g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke(); g.fillText(fmt(p), W - padR + 6, yy + 4); }
-    for (let i = 0; i < n; i++) {
+
+  // ---------- K 線圖（TradingView Lightweight Charts） ----------
+  const TW = 8 * 3600; // 1 分 K 以台灣時間顯示
+  let CH = null;
+  function destroyChart() { if (CH) { CH.chart.remove(); CH = null; } }
+  function newChart() {
+    destroyChart();
+    const css = getComputedStyle(document.documentElement), c = (v) => css.getPropertyValue(v).trim();
+    const k = { up: c('--up'), dn: c('--down'), ink: c('--ink'), muted: c('--muted'), line: c('--line'), signal: c('--signal') };
+    const el = $('#lwc'); el.innerHTML = '';
+    const chart = LightweightCharts.createChart(el, {
+      autoSize: true,
+      layout: { background: { type: 'solid', color: 'transparent' }, textColor: k.muted, fontFamily: '"Noto Sans TC", system-ui, sans-serif' },
+      grid: { vertLines: { color: k.line }, horzLines: { color: k.line } },
+      rightPriceScale: { borderColor: k.line }, timeScale: { borderColor: k.line, rightOffset: 4 },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      localization: { locale: 'zh-TW', priceFormatter: (p) => fmt(p) },
+    });
+    const candle = chart.addCandlestickSeries({ upColor: k.up, downColor: k.dn, borderUpColor: k.up, borderDownColor: k.dn, wickUpColor: k.up, wickDownColor: k.dn });
+    candle.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.26 } });
+    const vol = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', lastValueVisible: false, priceLineVisible: false });
+    chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+    return { chart, candle, vol, k };
+  }
+  const volColor = (k, up) => (up ? k.up : k.dn) + '80';
+  function showChart(mode) {
+    $$('#chartTabs button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === mode)));
+    const { s } = S.detail;
+    if (mode === 'intra') return showIntra(s.id);
+    Live.setChart(null);
+    showDaily();
+  }
+  function showDaily() {
+    const { s, bt, dates } = S.detail, c = newChart(), k = c.k, t = (i) => dates[i];
+    const data = [], vd = [];
+    for (let i = 0; i < s.c.length; i++) {
       if (s.c[i] === null) continue;
-      const upc = s.c[i] >= s.o[i], c = upc ? col('--up') : col('--down');
-      g.strokeStyle = c; g.fillStyle = c;
-      g.beginPath(); g.moveTo(x(i), y(s.h[i])); g.lineTo(x(i), y(s.l[i])); g.stroke();
-      const y1 = y(Math.max(s.o[i], s.c[i])), y2 = y(Math.min(s.o[i], s.c[i]));
-      g.fillRect(x(i) - bw / 2, y1, bw, Math.max(1, y2 - y1));
-      const vh = (volH * (s.v[i] || 0)) / vmax; g.globalAlpha = 0.55; g.fillRect(x(i) - bw / 2, volTop + volH - vh, bw, vh); g.globalAlpha = 1;
+      data.push({ time: t(i), open: s.o[i], high: s.h[i], low: s.l[i], close: s.c[i] });
+      vd.push({ time: t(i), value: s.v[i] || 0, color: volColor(k, s.c[i] >= s.o[i]) });
     }
-    const lines = [[5, '#D9A21B'], [20, '#3F7BD8'], [60, '#8B5CC7']];
-    lines.forEach(([p, c]) => { const m = E.series(s, { ind: 'sma', p: { n: p } }); g.strokeStyle = c; g.lineWidth = 1.3; g.beginPath(); let st = false; m.forEach((v, i) => { if (v === null) { st = false; return; } st ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)); st = true; }); g.stroke(); });
-    g.lineWidth = 1; let lx = padL + 4;
-    lines.forEach(([p, c]) => { g.fillStyle = c; g.fillText(`MA${p}`, lx, top + 10); lx += 42; });
-    const mark = (i, up) => { g.fillStyle = up ? col('--signal') : col('--ink'); const xx = x(i), yy = up ? y(s.l[i]) + 12 : y(s.h[i]) - 12; g.beginPath(); if (up) { g.moveTo(xx, yy - 6); g.lineTo(xx - 5, yy + 3); g.lineTo(xx + 5, yy + 3); } else { g.moveTo(xx, yy + 6); g.lineTo(xx - 5, yy - 3); g.lineTo(xx + 5, yy - 3); } g.fill(); };
-    bt.trades.forEach((t) => { mark(t.inIdx, true); mark(t.outIdx, false); }); if (bt.open) mark(bt.open.inIdx, true);
-    g.fillStyle = col('--muted'); const D = S.data.dates; [0, Math.floor(n / 2), n - 1].forEach((i, k) => { g.textAlign = ['left', 'center', 'right'][k]; g.fillText(D[i].replaceAll('-', '/'), x(i), H - 4); }); g.textAlign = 'left';
+    c.candle.setData(data); c.vol.setData(vd);
+    for (const [n, col] of [[5, '#D9A21B'], [20, '#3F7BD8'], [60, '#8B5CC7']]) {
+      const m = E.series(s, { ind: 'sma', p: { n } });
+      c.chart.addLineSeries({ color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false })
+        .setData(m.map((v, i) => (v === null ? null : { time: t(i), value: v })).filter(Boolean));
+    }
+    const mk = [];
+    bt.trades.forEach((tr) => { mk.push({ time: t(tr.inIdx), position: 'belowBar', color: k.signal, shape: 'arrowUp', text: '買' }); mk.push({ time: t(tr.outIdx), position: 'aboveBar', color: k.ink, shape: 'arrowDown', text: '賣' }); });
+    if (bt.open) mk.push({ time: t(bt.open.inIdx), position: 'belowBar', color: k.signal, shape: 'arrowUp', text: '買' });
+    mk.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+    c.candle.setMarkers(mk);
+    c.chart.timeScale().fitContent();
+    CH = { ...c, mode: 'day', id: s.id };
+    $('#chartNote').textContent = '日 K（未還原股價）｜MA5 黃、MA20 藍、MA60 紫｜▲買 ▼賣為目前策略的回測進出場點。' + (S.isLiveRun ? '最後一根為盤中即時。' : '');
+  }
+  async function showIntra(id) {
+    const c = newChart();
+    c.chart.applyOptions({ timeScale: { timeVisible: true, secondsVisible: false } });
+    CH = { ...c, mode: 'intra', id };
+    $('#chartNote').textContent = '載入中…';
+    Live.setChart(id);
+    try {
+      const j = await Live.bars(id);
+      if (!CH || CH.id !== id || CH.mode !== 'intra') return;
+      const k = c.k;
+      c.candle.setData(j.bars.map((b) => ({ time: b[0] + TW, open: b[1], high: b[2], low: b[3], close: b[4] })));
+      c.vol.setData(j.bars.map((b) => ({ time: b[0] + TW, value: b[5], color: volColor(k, b[4] >= b[1]) })));
+      const q = Live.quote(id);
+      if (q?.y) c.candle.createPriceLine({ price: q.y, color: k.muted, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '昨收' });
+      c.chart.timeScale().fitContent();
+      $('#chartNote').textContent = j.bars.length
+        ? `當日 1 分 K（${j.bars.length} 根）｜由證交所約 5 秒一次的快照組成，盤中自動更新。`
+        : (Live.status === 'live' ? '今天尚未記錄到成交，稍候會自動出現。' : '目前非交易時段，今天沒有盤中資料。可切到「日 K」查看。');
+      paintQuote(id);
+    } catch (e) { $('#chartNote').textContent = '即時資料暫時無法取得，稍後再試。'; }
+  }
+  function paintQuote(id) {
+    const el = $('#dQuote'), q = Live.quote(id);
+    el.innerHTML = '';
+    if (!q || !q.z) { el.hidden = true; return; }
+    el.hidden = false;
+    const tm = q.t ? new Date(q.t).toLocaleTimeString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' }) : '';
+    el.append(h('strong', { class: 'qz ' + cls(q.chg) }, fmt(q.z)), h('span', { class: cls(q.chg) }, `${q.z - q.y > 0 ? '+' : ''}${fmt(q.z - q.y)}（${pct(q.chg)}）`),
+      h('span', {}, `量 ${fmt(q.v, 0)} 張`), h('span', {}, `開 ${fmt(q.o)}　高 ${fmt(q.h)}　低 ${fmt(q.l)}`),
+      h('span', {}, `買 ${fmt(q.b)}　賣 ${fmt(q.a)}`), h('span', { class: 'count' }, tm));
+  }
+  function paintPill() {
+    const p = $('#livePill');
+    if (!Live.enabled) { p.hidden = true; return; }
+    const m = { connecting: ['即時連線中…', ''], live: ['● 盤中即時', 'on'], closed: ['盤後｜顯示最後報價', ''], error: ['即時連線中斷，自動重試中', 'err'] }[Live.status] || ['', ''];
+    p.hidden = false; p.textContent = m[0]; p.className = 'live-pill ' + m[1];
   }
 
   // ---------- 匯出 / 分享 ----------
@@ -400,6 +546,15 @@
       e.target.value = '';
     });
     $('#btnSources').addEventListener('click', () => $('#srcDlg').showModal());
+    $$('#chartTabs button').forEach((b) => b.addEventListener('click', () => showChart(b.dataset.c)));
+    $('#detail').addEventListener('close', () => { destroyChart(); Live.setChart(null); });
+    $('#watchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addWatch(e.target.value); e.target.value = ''; } });
+    $('#watchAdd').addEventListener('click', () => { addWatch($('#watchInput').value); $('#watchInput').value = ''; });
+    $('#liveToggle').addEventListener('change', (e) => {
+      S.liveMode = e.target.checked;
+      if (S.liveMode && !(liveDayISO() > S.data.dates[S.data.dates.length - 1])) toast('目前沒有比盤後資料更新的即時報價（非交易時段或尚未開盤）');
+      run();
+    });
   }
 
   // ---------- 啟動 ----------
@@ -430,6 +585,18 @@
     dl.append(h('dt', {}, '更新時間'), h('dd', {}, m.updated), h('dt', {}, '說明'), h('dd', {}, m.note || ''));
     src.append(dl);
     renderInds(); renderBoards();
+    const sl = $('#stockList'); S.data.stocks.forEach((x) => sl.append(h('option', { value: `${x.id} ${x.name}` })));
+    renderWatch();
+    $('#liveToggleWrap').hidden = !Live.enabled;
+    Live.on('status', paintPill);
+    Live.on('quotes', (ids) => { paintLive(ids); if (CH) paintQuote(CH.id); });
+    Live.on('snapshot', () => { paintAllLive(); if (S.liveMode) run({ keepPage: true }); });
+    Live.on('bar', ({ id, b }) => {
+      if (!CH || CH.mode !== 'intra' || CH.id !== id) return;
+      CH.candle.update({ time: b[0] + TW, open: b[1], high: b[2], low: b[3], close: b[4] });
+      CH.vol.update({ time: b[0] + TW, value: b[5], color: volColor(CH.k, b[4] >= b[1]) });
+    });
+    paintPill();
     run();
   }
   init();
