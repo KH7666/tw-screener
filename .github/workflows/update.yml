@@ -1,0 +1,83 @@
+name: 每日更新台股資料並發布網站
+
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"    # 台灣 18:00（收盤行情與三大法人皆已公布）
+    - cron: "30 13 * * 1-5"   # 台灣 21:30 再跑一次，補上傍晚未完成的部分
+  workflow_dispatch:          # 可在 Actions 頁面手動執行
+  push:
+    branches: [main]
+    paths: ["docs/**", "pipeline/**", ".github/workflows/**"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取出既有資料庫（data 分支）
+        run: |
+          mkdir -p docs/data
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch --depth=1 origin data
+            git show FETCH_HEAD:market.json > docs/data/market.json
+            git show FETCH_HEAD:meta.json   > docs/data/meta.json || true
+            echo "已載入既有資料庫"
+          else
+            echo "首次執行：將從頭建立資料庫（約 20–40 分鐘）"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: 抓取官方盤後資料
+        id: fetch
+        continue-on-error: true
+        run: python pipeline/fetch.py
+
+      - name: 保存資料庫到 data 分支（只保留最新一版，不累積 repo 體積）
+        if: steps.fetch.outcome == 'success'
+        run: |
+          mkdir -p /tmp/pub && cp docs/data/market.json docs/data/meta.json /tmp/pub/
+          cd /tmp/pub
+          git init -q -b data
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add . && git commit -qm "data $(TZ=Asia/Taipei date +%Y/%m/%d_%H:%M)"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
+
+      - name: 資料更新失敗提示
+        if: steps.fetch.outcome != 'success'
+        run: echo "::warning::本次資料未更新（來源暫時無法連線或驗證未通過），網站沿用上一版資料，下個排程會自動重試。"
+
+      - name: 確認有資料可發布
+        run: test -s docs/data/market.json || (echo "::error::尚無任何資料可發布，請稍後手動重新執行" && exit 1)
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
