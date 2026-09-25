@@ -78,6 +78,8 @@ class State:
         self.cycle_seconds = None
         self.holiday = False
         self.stale = 0
+        self.last_error = ""
+        self.last_sync = 0.0  # 盤後同步時間
 
     def hot(self) -> list[str]:
         cnt: dict[str, int] = defaultdict(int)
@@ -234,6 +236,8 @@ async def poller():
                 if t.hour < 9:
                     await load_universe()  # 每天開盤前更新清單與前收價
             if not trading_window(t) or not S.universe or S.holiday:
+                if S.universe and t.weekday() < 5 and (t.hour, t.minute) >= (13, 36) and time.time() - S.last_sync > 1800:
+                    await offhours_sync(cli)  # 收盤後同步當日收盤報價，網站盤後也看得到最後價
                 if time.time() - last_save > 60:
                     save_state(); last_save = time.time()
                 await asyncio.sleep(15)
@@ -259,6 +263,7 @@ async def poller():
                     await broadcast(changed)
             except Exception as e:  # noqa: BLE001
                 S.err += 1
+                S.last_error = f"{now():%H:%M:%S} {e}"[:200]
                 S.interval = min(10.0, S.interval * 2)
                 log.warning("證交所查詢失敗（間隔調為 %.1f 秒）：%s", S.interval, e)
                 try:
@@ -268,6 +273,25 @@ async def poller():
             if time.time() - last_save > 60:
                 save_state(); last_save = time.time()
             await asyncio.sleep(S.interval)
+
+
+async def offhours_sync(cli: httpx.AsyncClient):
+    """盤後全市場同步一輪；只接受今天日期的資料（週末、假日會自動略過）"""
+    S.last_sync = time.time()
+    got = 0
+    for i in range(0, len(S.order), BATCH):
+        try:
+            got += len(await query(cli, S.order[i:i + BATCH]))
+            S.ok += 1; S.last_ok = time.time()
+        except Exception as e:  # noqa: BLE001
+            S.err += 1
+            S.last_error = f"{now():%H:%M:%S} {e}"[:200]
+            log.warning("盤後同步失敗：%s", e)
+            await asyncio.sleep(10)
+        await asyncio.sleep(SLOT)
+    S.holiday = False  # 盤後同步不影響隔日判斷
+    log.info("盤後同步完成：%d 檔有今日報價", got)
+    save_state()
 
 
 def pack(sid: str) -> list:
@@ -334,7 +358,8 @@ def status_dict():
     return {"day": S.day, "trading": trading_window(t) and not S.holiday, "holiday": S.holiday,
             "universe": len(S.universe), "quotes": len(S.quotes), "bars": len(S.bars),
             "hot": len(S.hot()), "clients": len(S.clients), "ok": S.ok, "err": S.err,
-            "last_ok": S.last_ok, "interval": round(S.interval, 2), "cycle_seconds": S.cycle_seconds,
+            "last_ok": S.last_ok, "last_error": S.last_error, "last_sync": S.last_sync,
+            "interval": round(S.interval, 2), "cycle_seconds": S.cycle_seconds,
             "server_time": t.isoformat()}
 
 
