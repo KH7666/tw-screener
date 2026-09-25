@@ -21,9 +21,11 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/
 $APT update
 $APT install -y caddy
 
-# Oracle 的 Ubuntu 映像預設用 iptables 擋掉 22 以外的連入，開放 80/443
-iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
-iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+# Oracle 的 Ubuntu 映像預設用 iptables 擋掉 22 以外的連入：80/443 必須插在 REJECT 規則「之前」才會生效
+N=$(iptables -L INPUT -n --line-numbers | awk '$2=="REJECT"{print $1; exit}')
+N=${N:-1}
+iptables -I INPUT "$N" -m state --state NEW -p tcp --dport 443 -j ACCEPT
+iptables -I INPUT "$N" -m state --state NEW -p tcp --dport 80 -j ACCEPT
 netfilter-persistent save
 
 # 程式
