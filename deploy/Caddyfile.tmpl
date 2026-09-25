@@ -1,5 +1,10 @@
 # 由 oracle-cloud-init.sh / update.sh 產生：{IP} 會換成主機的公用 IP
 # Let's Encrypt 自 2026/01 起可直接為 IP 簽發憑證（需 shortlived 設定檔，6 天效期，Caddy 自動續簽）
+{
+	# 用 IP 連線時瀏覽器不會送 SNI，指定預設憑證
+	default_sni {IP}
+}
+
 {IP} {
 	tls {
 		issuer acme {
