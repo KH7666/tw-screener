@@ -217,7 +217,8 @@
     if (!S.liveMode || !day || day <= dates[dates.length - 1]) return { stocks: null, dates };
     const out = new Map();
     for (const s of S.data.stocks) {
-      const q = Live.quote(s.id), prev = s.c[s.c.length - 1], has = !!(q && q.z && q.v);
+      const q = Live.quote(s.id), prev = s.c[s.c.length - 1];
+      const has = !!(q && q.z && q.v && q.t && new Date(q.t + 8 * 3600e3).toISOString().slice(0, 10) === day); // 只用今天的報價
       const bar = has ? [q.o || q.z, Math.max(q.h || q.z, q.z), Math.min(q.l || q.z, q.z), q.z, Math.round(q.v)] : [prev, prev, prev, prev, 0];
       out.set(s.id, { ...s, o: [...s.o, bar[0]], h: [...s.h, bar[1]], l: [...s.l, bar[2]], c: [...s.c, bar[3]], v: [...s.v, bar[4]],
         fi: s.fi && [...s.fi, 0], it: s.it && [...s.it, 0], dl: s.dl && [...s.dl, 0], live: has });
