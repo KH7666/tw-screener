@@ -80,6 +80,8 @@ class State:
         self.stale = 0
         self.last_error = ""
         self.last_sync = 0.0  # 盤後同步時間
+        self.offhours = False  # 盤後同步中：接受非今日資料，只更新報價不組 K 棒
+        self.quote_day = ""   # 目前報價所屬的交易日
 
     def hot(self) -> list[str]:
         cnt: dict[str, int] = defaultdict(int)
@@ -125,7 +127,7 @@ def save_state():
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         tmp = state_file(S.day).with_suffix(".tmp")
-        tmp.write_text(json.dumps({"day": S.day, "quotes": S.quotes, "bars": S.bars, "cumv": S.cumv,
+        tmp.write_text(json.dumps({"day": S.day, "quote_day": S.quote_day, "quotes": S.quotes, "bars": S.bars, "cumv": S.cumv,
                                    "dayhl": S.dayhl}, separators=(",", ":")), "utf-8")
         tmp.replace(state_file(S.day))
         for p in DATA_DIR.glob("state-*.json"):  # 只保留最近 3 天
@@ -142,6 +144,7 @@ def load_state(day: str):
     try:
         j = json.loads(p.read_text("utf-8"))
         S.quotes, S.bars, S.cumv = j["quotes"], j["bars"], j["cumv"]
+        S.quote_day = j.get("quote_day", "")
         S.dayhl = {k: tuple(v) for k, v in j["dayhl"].items()}
         log.info("載入今日已記錄的資料：%d 檔", len(S.bars))
     except Exception as e:  # noqa: BLE001
@@ -150,7 +153,8 @@ def load_state(day: str):
 
 def new_day(day: str):
     save_state()
-    S.day, S.quotes, S.bars, S.cumv, S.dayhl, S.holiday = day, {}, {}, {}, {}, False
+    S.day, S.bars, S.cumv, S.dayhl, S.holiday = day, {}, {}, {}, False  # 報價保留到新資料進來
+    S.last_sync = 0.0
     load_state(day)
 
 
@@ -160,9 +164,11 @@ def ingest(r: dict) -> str | None:
     if sid not in S.universe:
         return None
     d = str(r.get("d", ""))
-    if d and d != S.day:
+    stale = bool(d and d != S.day)
+    if stale:
         S.stale += 1  # 回傳的不是今天的資料
-        return None
+        if not S.offhours:
+            return None
     tl = int(r.get("tlong") or 0)
     z, y = f(r.get("z")), f(r.get("y"))
     o, h, l, v = f(r.get("o")), f(r.get("h")), f(r.get("l")), f(r.get("v")) or 0.0
@@ -173,6 +179,10 @@ def ingest(r: dict) -> str | None:
     q.update({"z": price, "y": y or q.get("y") or S.universe[sid]["y"], "o": o, "h": h, "l": l,
               "v": v, "t": tl or q.get("t"), "b": bid, "a": ask})
     S.quotes[sid] = q
+    if d:
+        S.quote_day = max(S.quote_day, d)
+    if stale:
+        return sid  # 休市或盤後的舊資料：只保留最後報價
     if z and tl:
         m = tl // 60000 * 60
         bars = S.bars.setdefault(sid, [])
@@ -236,7 +246,8 @@ async def poller():
                 if t.hour < 9:
                     await load_universe()  # 每天開盤前更新清單與前收價
             if not trading_window(t) or not S.universe or S.holiday:
-                if S.universe and t.weekday() < 5 and (t.hour, t.minute) >= (13, 36) and time.time() - S.last_sync > 1800:
+                need = not S.quotes or (t.weekday() < 5 and (t.hour, t.minute) >= (13, 36))
+                if S.universe and need and time.time() - S.last_sync > 1800:
                     await offhours_sync(cli)  # 收盤後同步當日收盤報價，網站盤後也看得到最後價
                 if time.time() - last_save > 60:
                     save_state(); last_save = time.time()
@@ -278,6 +289,7 @@ async def poller():
 async def offhours_sync(cli: httpx.AsyncClient):
     """盤後全市場同步一輪；只接受今天日期的資料（週末、假日會自動略過）"""
     S.last_sync = time.time()
+    S.offhours = True
     got = 0
     for i in range(0, len(S.order), BATCH):
         try:
@@ -289,8 +301,8 @@ async def offhours_sync(cli: httpx.AsyncClient):
             log.warning("盤後同步失敗：%s", e)
             await asyncio.sleep(10)
         await asyncio.sleep(SLOT)
-    S.holiday = False  # 盤後同步不影響隔日判斷
-    log.info("盤後同步完成：%d 檔有今日報價", got)
+    S.offhours = False
+    log.info("盤後同步完成：%d 檔報價（交易日 %s）", got, S.quote_day)
     save_state()
 
 
@@ -355,7 +367,7 @@ async def shutdown():
 
 def status_dict():
     t = now()
-    return {"day": S.day, "trading": trading_window(t) and not S.holiday, "holiday": S.holiday,
+    return {"day": S.quote_day or S.day, "today": S.day, "trading": trading_window(t) and not S.holiday, "holiday": S.holiday,
             "universe": len(S.universe), "quotes": len(S.quotes), "bars": len(S.bars),
             "hot": len(S.hot()), "clients": len(S.clients), "ok": S.ok, "err": S.err,
             "last_ok": S.last_ok, "last_error": S.last_error, "last_sync": S.last_sync,
@@ -370,7 +382,7 @@ async def api_status():
 
 @app.get("/api/snapshot")
 async def api_snapshot():
-    return {"day": S.day, "t": S.last_ok, "q": {i: pack(i) for i in S.quotes}}
+    return {"day": S.quote_day or S.day, "t": S.last_ok, "q": {i: pack(i) for i in S.quotes}}
 
 
 @app.get("/api/bars/{sid}")
